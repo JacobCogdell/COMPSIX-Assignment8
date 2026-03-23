@@ -1,11 +1,21 @@
 const express = require('express');
-const { db, Project, Task } = require('./database/setup');
+const { db, Project, Task, User } = require('./database/setup');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const session = require('express-session');
+const bcrypt = require('bcrypt');
+
 // Middleware
 app.use(express.json());
+app.use(session({
+    secret: 'supersecretkey123',   
+    resave: false,
+    saveUninitialized: false,
+    cookie: { secure: false }   
+}));
+
 
 // Test database connection
 async function testConnection() {
@@ -18,6 +28,101 @@ async function testConnection() {
 }
 
 testConnection();
+
+// POST /api/register - Create a new user
+app.post('/api/register', async (req, res) => {
+    try {
+        const { username, email, password } = req.body;
+
+        // Check if email already exists
+        const existingUser = await User.findOne({ where: { email } });
+        if (existingUser) {
+            return res.status(400).json({ error: 'Email already in use' });
+        }
+
+        // Hash password
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        // Create user
+        const newUser = await User.create({
+            username,
+            email,
+            password: hashedPassword
+        });
+
+        res.status(201).json({
+            message: 'User registered successfully',
+            userId: newUser.id
+        });
+
+    } catch (error) {
+        console.error('Error registering user:', error);
+        res.status(500).json({ error: 'Registration failed' });
+    }
+});
+
+// POST /api/login - User login
+app.post('/api/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+
+        // Find user by email
+        const user = await User.findOne({ where: { email } });
+
+        if (!user) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+
+        // Compare provided password with hashed password
+        const isMatch = await bcrypt.compare(password, user.password);
+
+        if (!isMatch) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+
+        // Create session
+        req.session.userId = user.id;
+        req.session.username = user.username;
+
+        res.json({ message: 'Login successful', userId: user.id });
+
+    } catch (error) {
+        console.error('Error during login:', error);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+// POST /api/logout - User logout
+app.post('/api/logout', (req, res) => {
+    req.session.destroy(err => {
+        if (err) {
+            console.error('Error destroying session:', err);
+            return res.status(500).json({ error: 'Logout failed' });
+        }
+
+        res.json({ message: 'Logged out successfully' });
+    });
+});
+
+// Middleware function to protect routes
+function requireLogin(req, res, next) {
+    // Check if session exists
+    if (!req.session || !req.session.userId) {
+        return res.status(401).json({ error: 'Unauthorized: Please log in first' });
+    }
+
+    // Attach user info to request
+    req.user = {
+        id: req.session.userId,
+        username: req.session.username
+    };
+
+    next(); 
+}
+
+//  Protect all routes under /api/projects and /api/tasks
+app.use('/api/projects', requireLogin);
+app.use('/api/tasks', requireLogin);
 
 // PROJECT ROUTES
 
@@ -57,7 +162,8 @@ app.post('/api/projects', async (req, res) => {
             name,
             description,
             status,
-            dueDate
+            dueDate,
+            userId: req.user.id
         });
         
         res.status(201).json(newProject);
